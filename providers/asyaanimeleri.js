@@ -107,32 +107,35 @@ function fetchMetadata(identifier, mediaType) {
     var titles = [];
     var year = null;
     var seasonEpisodeCounts = {};
-    var metadataUrls = languages.map(function(language) {
-      return TMDB_API_URL + "/" + type + "/" + encodeURIComponent(String(tmdbId)) + "?api_key=" + TMDB_API_KEY + "&language=" + language;
+    var chain = Promise.resolve();
+
+    languages.forEach(function(language) {
+      chain = chain.then(function() {
+        var url = TMDB_API_URL + "/" + type + "/" + encodeURIComponent(String(tmdbId)) + "?api_key=" + TMDB_API_KEY + "&language=" + language;
+        return requestJson(url).then(function(data) {
+          if (data.title || data.name) titles.push(data.title || data.name);
+          if (data.original_title || data.original_name) titles.push(data.original_title || data.original_name);
+          if (!year) year = Number(String(data.release_date || data.first_air_date || "").slice(0, 4)) || null;
+          (data.seasons || []).forEach(function(item) {
+            var seasonNumber = Number(item.season_number);
+            var episodeCount = Number(item.episode_count);
+            if (seasonNumber > 0 && episodeCount > 0) seasonEpisodeCounts[seasonNumber] = episodeCount;
+          });
+        }).catch(function() {});
+      });
     });
-    metadataUrls.push(TMDB_API_URL + "/" + type + "/" + encodeURIComponent(String(tmdbId)) + "/alternative_titles?api_key=" + TMDB_API_KEY);
 
-    // Dil varyantlarını ve alternatif başlıkları seri beklemeden aynı anda toplarız.
-    return Promise.all(metadataUrls.map(function(url) {
-      return requestJson(url).catch(function() { return null; });
-    })).then(function(responses) {
-      responses.slice(0, languages.length).forEach(function(data) {
-        if (!data) return;
-        if (data.title || data.name) titles.push(data.title || data.name);
-        if (data.original_title || data.original_name) titles.push(data.original_title || data.original_name);
-        if (!year) year = Number(String(data.release_date || data.first_air_date || "").slice(0, 4)) || null;
-        (data.seasons || []).forEach(function(item) {
-          var seasonNumber = Number(item.season_number);
-          var episodeCount = Number(item.episode_count);
-          if (seasonNumber > 0 && episodeCount > 0) seasonEpisodeCounts[seasonNumber] = episodeCount;
+    chain = chain.then(function() {
+      var url = TMDB_API_URL + "/" + type + "/" + encodeURIComponent(String(tmdbId)) + "/alternative_titles?api_key=" + TMDB_API_KEY;
+      return requestJson(url).then(function(data) {
+        var alternatives = data.titles || data.results || [];
+        alternatives.forEach(function(item) {
+          if (item.title) titles.push(item.title);
         });
-      });
+      }).catch(function() {});
+    });
 
-      var alternatives = responses[languages.length];
-      (alternatives && (alternatives.titles || alternatives.results) || []).forEach(function(item) {
-        if (item.title) titles.push(item.title);
-      });
-
+    return chain.then(function() {
       titles = unique(titles).filter(function(title) { return normalize(title).length > 1; });
       if (!titles.length) throw new Error("TMDB metadata bulunamadı");
       return { tmdbId: tmdbId, titles: titles, year: year, displayTitle: titles[0], seasonEpisodeCounts: seasonEpisodeCounts };
@@ -210,47 +213,55 @@ function searchQueries(metadata, season) {
 function searchSeries(metadata, season) {
   var queries = searchQueries(metadata, season);
   var candidates = [];
+  var decisiveScore = season && Number(season) > 1 ? 150 : 120;
 
-  function collectResults(html) {
-    var resultsStart = html.search(/<div[^>]+class=["'][^"']*listupd/i);
-    var resultsEnd = resultsStart >= 0 ? html.indexOf('<div id="sidebar', resultsStart) : -1;
-    var resultsHtml = resultsStart >= 0 && resultsEnd > resultsStart ? html.slice(resultsStart, resultsEnd) : "";
-    var meaningfulRank = 0;
-
-    // Sidebar önerilerini değil yalnızca gerçek WordPress arama sonuçlarını değerlendiririz.
-    extractAnchors(resultsHtml).forEach(function(anchor) {
-      if (!/\/series\/[^/?#]+\/?(?:[?#].*)?$/i.test(anchor.url)) return;
-      var url = absoluteUrl(anchor.url, BASE_URL + "/");
-      var existing = null;
-      var hasText = Boolean(normalize(anchor.title + " " + anchor.text));
-      var searchScore = hasText ? Math.max(55, 70 - meaningfulRank * 5) : 0;
-      if (hasText) meaningfulRank += 1;
-
-      candidates.forEach(function(item) {
-        if (item.url === url) existing = item;
-      });
-      if (existing) {
-        if (!existing.title && anchor.title) existing.title = anchor.title;
-        if (!existing.text && anchor.text) existing.text = anchor.text;
-        existing.searchScore = Math.max(existing.searchScore || 0, searchScore);
-      } else {
-        candidates.push({ url: url, title: anchor.title, text: anchor.text, searchScore: searchScore });
-      }
-    });
-  }
-
-  // Başlık varyantlarını aynı anda arayarak seri aramasındaki bekleme zincirini kaldırırız.
-  return Promise.all(queries.map(function(query) {
-    return requestText(BASE_URL + "/?s=" + encodeURIComponent(query), BASE_URL + "/")
-      .then(function(html) { collectResults(html); })
-      .catch(function() {});
-  })).then(function() {
+  function rankedCandidate() {
     candidates.forEach(function(candidate) {
       candidate.score = candidateScore(candidate, metadata, season);
     });
     candidates.sort(function(left, right) { return right.score - left.score; });
-    return candidates.length && candidates[0].score >= 55 ? candidates[0] : null;
-  });
+    return candidates.length ? candidates[0] : null;
+  }
+
+  function next(index) {
+    var currentBest = rankedCandidate();
+    if (currentBest && currentBest.score >= decisiveScore) return Promise.resolve(currentBest);
+    if (index >= queries.length) return Promise.resolve(currentBest && currentBest.score >= 55 ? currentBest : null);
+
+    return requestText(BASE_URL + "/?s=" + encodeURIComponent(queries[index]), BASE_URL + "/")
+      .then(function(html) {
+        var resultsStart = html.search(/<div[^>]+class=["'][^"']*listupd/i);
+        var resultsEnd = resultsStart >= 0 ? html.indexOf('<div id="sidebar', resultsStart) : -1;
+        var resultsHtml = resultsStart >= 0 && resultsEnd > resultsStart ? html.slice(resultsStart, resultsEnd) : "";
+        var meaningfulRank = 0;
+
+        // Sidebar önerilerini değil yalnızca gerçek WordPress arama sonuçlarını değerlendiririz.
+        extractAnchors(resultsHtml).forEach(function(anchor) {
+          if (!/\/series\/[^/?#]+\/?(?:[?#].*)?$/i.test(anchor.url)) return;
+          var url = absoluteUrl(anchor.url, BASE_URL + "/");
+          var existing = null;
+          var hasText = Boolean(normalize(anchor.title + " " + anchor.text));
+          var searchScore = hasText ? Math.max(55, 70 - meaningfulRank * 5) : 0;
+          if (hasText) meaningfulRank += 1;
+
+          candidates.forEach(function(item) {
+            if (item.url === url) existing = item;
+          });
+          if (existing) {
+            if (!existing.title && anchor.title) existing.title = anchor.title;
+            if (!existing.text && anchor.text) existing.text = anchor.text;
+            existing.searchScore = Math.max(existing.searchScore || 0, searchScore);
+          } else {
+            candidates.push({ url: url, title: anchor.title, text: anchor.text, searchScore: searchScore });
+          }
+        });
+      })
+      .catch(function() {})
+      .then(function() { return next(index + 1); });
+  }
+
+  // Kesin başlık eşleşmesi yakalanınca gereksiz site aramalarını durdururuz.
+  return next(0);
 }
 
 function candidateMatchesSeason(candidate, season) {
@@ -552,15 +563,6 @@ function resolveGoogleDriveMedia(source, pageUrl) {
   }));
 }
 
-function withTimeout(promise, milliseconds) {
-  return Promise.race([
-    promise,
-    new Promise(function(resolve) {
-      setTimeout(function() { resolve(null); }, milliseconds);
-    })
-  ]);
-}
-
 function resolveVipMedia(referenceUrl, episodeUrl) {
   var match = String(referenceUrl || "").match(/^https?:\/\/([^/]*asyaanimeleri\.pw)\/video\/([A-Za-z0-9_-]+)/i);
   if (!match) return Promise.resolve([]);
@@ -597,10 +599,9 @@ function resolveVipMedia(referenceUrl, episodeUrl) {
 function resolvePlayer(reference, episodeUrl) {
   var direct = extractMediaUrls(reference.url, episodeUrl);
   var isGoogleDrive = /drive\.google\.com\/file\/d\//i.test(reference.url);
-  var resolution;
 
   // Asya VIP iframe'i kendi AJAX endpointinden imzalı HLS kök linki üretir.
-  resolution = resolveVipMedia(reference.url, episodeUrl).then(function(vipMedia) {
+  return resolveVipMedia(reference.url, episodeUrl).then(function(vipMedia) {
     if (vipMedia.length) return { reference: reference, media: vipMedia };
     if (direct.length && !isGoogleDrive) return { reference: reference, media: direct };
 
@@ -615,13 +616,6 @@ function resolvePlayer(reference, episodeUrl) {
     }).catch(function() {
       return { reference: reference, media: direct };
     });
-  });
-
-  // Ulaşılamayan bir mirror diğer çalışan kaynakların Nuvio'ya dönmesini engellememeli.
-  return withTimeout(resolution, 8000).then(function(result) {
-    return result || { reference: reference, media: [] };
-  }).catch(function() {
-    return { reference: reference, media: direct };
   });
 }
 
