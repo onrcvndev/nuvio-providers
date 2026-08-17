@@ -1,0 +1,30 @@
+{
+  "name": "Onrcvn",
+  "version": "3.0.0",
+  "scrapers": [
+    {
+      "id": "asyaanimeleri",
+      "name": "CVN-AsyaAnimeleri",
+      "description": "AsyaAnimeleri için doğrudan web scraper Nuvio provider'ı.",
+      "version": "1.0.0",
+      "author": "Onur Civanoglu",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/asyaanimeleri.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "hls",
+        "m3u8"
+      ],
+      "logo": "https://asyaanimeleri.top/wp-content/uploads/2022/01/cropped-Asya-animeleri-12-e1629130525708-2-e1641560729784-192x192.png",
+      "contentLanguage": [
+        "tr"
+      ],
+      "limited": false,
+      "disabledPlatforms": []
+    }
+  ]
+}
