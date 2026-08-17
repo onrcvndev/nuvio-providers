@@ -27,7 +27,9 @@ A collection of streaming providers for the Nuvio app. Providers are JavaScript 
 ```
 nuvio-providers/
 ├── providers/              # Active single-file web scrape providers
-│   └── asyaanimeleri.js    # AsyaAnimeleri web scraper
+│   ├── asyaanimeleri.js    # AsyaAnimeleri web scraper
+│   ├── dizibox.js           # DiziBOX web scraper
+│   └── hdfilmcehennemi.js   # HDFilmCehennemi web scraper
 │
 ├── manifest.json           # Provider registry
 ├── build.js                # Build script

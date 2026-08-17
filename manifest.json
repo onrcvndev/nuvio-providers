@@ -25,6 +25,53 @@
       ],
       "limited": false,
       "disabledPlatforms": []
+    },
+    {
+      "id": "dizibox",
+      "name": "CVN-DiziBOX",
+      "description": "DiziBOX için doğrudan web scraper Nuvio provider'ı.",
+      "version": "1.0.0",
+      "author": "Onur Civanoglu",
+      "supportedTypes": [
+        "tv"
+      ],
+      "filename": "providers/dizibox.js",
+      "enabled": false,
+      "formats": [
+        "mp4",
+        "hls",
+        "m3u8"
+      ],
+      "logo": "https://www.dizibox.live/wp-content/themes/dbx18/assets/img/logo.png",
+      "contentLanguage": [
+        "tr"
+      ],
+      "limited": false,
+      "disabledPlatforms": []
+    },
+    {
+      "id": "hdfilmcehennemi",
+      "name": "CVN-HDFilmCehennemi",
+      "description": "HDFilmCehennemi için doğrudan web scraper Nuvio provider'ı.",
+      "version": "1.0.0",
+      "author": "Onur Civanoglu",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/hdfilmcehennemi.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "hls",
+        "m3u8"
+      ],
+      "logo": "https://www.hdfilmcehennemi.nl/dist/images/logo.svg",
+      "contentLanguage": [
+        "tr"
+      ],
+      "limited": false,
+      "disabledPlatforms": []
     }
   ]
 }

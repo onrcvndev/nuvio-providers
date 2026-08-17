@@ -683,10 +683,19 @@ function episodeUrlForPage(detailHtml, candidate, metadata, mediaType, season, e
   return findEpisodeUrl(detailHtml, targetEpisode, metadata);
 }
 
+function providerDisplayTitle(candidate, fallback) {
+  var value = candidate && (candidate.title || candidate.text) || fallback;
+  return stripTags(value)
+    .replace(/\s*\(\d{4}\)\s*$/i, "")
+    .replace(/\s+(?:izle|watch)\s*$/i, "")
+    .trim() || fallback;
+}
+
 function streamsForCandidate(candidate, metadata, mediaType, season, episode) {
   return requestText(candidate.url, BASE_URL + "/").then(function(detailHtml) {
+    var displayName = providerDisplayTitle(candidate, metadata.displayTitle);
     var episodeUrl = episodeUrlForPage(detailHtml, candidate, metadata, mediaType, season, episode);
-    var displayTitle = metadata.displayTitle + (mediaType === "tv" ? " S" + Number(season || 1) + "E" + Number(episode || 1) : "");
+    var displayTitle = displayName + (mediaType === "tv" ? " S" + Number(season || 1) + "E" + Number(episode || 1) : "");
 
     if (episodeUrl) {
       return requestText(episodeUrl, candidate.url).then(function(episodeHtml) {
