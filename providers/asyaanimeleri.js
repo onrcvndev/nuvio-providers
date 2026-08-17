@@ -169,32 +169,33 @@ function slugTitle(url) {
 function candidateScore(candidate, metadata, season) {
   var candidateTitle = normalize(candidate.title);
   var slug = normalize(slugTitle(candidate.url));
-  var score = Number(candidate.searchScore || 0);
+  var searchScore = Number(candidate.searchScore || 0);
+  var titleScore = 0;
   var pageText = normalize(candidate.text);
 
   metadata.titles.forEach(function(title) {
     var target = normalize(title);
     if (!target) return;
-    if ((candidateTitle && candidateTitle === target) || (slug && slug === target)) score = Math.max(score, 120);
-    else if (candidateTitle && (candidateTitle.indexOf(target) !== -1 || target.indexOf(candidateTitle) !== -1)) score = Math.max(score, 85);
-    else if (slug && (slug.indexOf(target) !== -1 || target.indexOf(slug) !== -1)) score = Math.max(score, 80);
+    if ((candidateTitle && candidateTitle === target) || (slug && slug === target)) titleScore = Math.max(titleScore, 120);
+    else if (candidateTitle && (candidateTitle.indexOf(target) !== -1 || target.indexOf(candidateTitle) !== -1)) titleScore = Math.max(titleScore, 85);
+    else if (slug && (slug.indexOf(target) !== -1 || target.indexOf(slug) !== -1)) titleScore = Math.max(titleScore, 80);
     else {
       var targetWords = target.split(" ");
       var hits = 0;
       targetWords.forEach(function(word) {
         if (word.length > 1 && ((candidateTitle && candidateTitle.indexOf(word) !== -1) || (slug && slug.indexOf(word) !== -1))) hits += 1;
       });
-      if (targetWords.length && hits / targetWords.length >= 0.7) score = Math.max(score, 55 + hits);
+      if (targetWords.length && hits / targetWords.length >= 0.7) titleScore = Math.max(titleScore, 55 + hits);
     }
   });
 
-  if (metadata.year && new RegExp("(^|\\D)" + metadata.year + "(\\D|$)").test(candidate.text)) score += 8;
-  if (season && Number(season) > 1) {
+  if (metadata.year && titleScore > 0 && new RegExp("(^|\\D)" + metadata.year + "(\\D|$)").test(candidate.text)) titleScore += 8;
+  if (season && Number(season) > 1 && titleScore >= 55) {
     var seasonPattern = new RegExp("(^| )" + Number(season) + " (sezon|season)( |$)");
-    if (seasonPattern.test(candidateTitle + " " + slug + " " + pageText)) score += 30;
-    else if (/(^| )\d+ (sezon|season)( |$)/.test(candidateTitle + " " + slug)) score -= 35;
+    if (seasonPattern.test(candidateTitle + " " + slug + " " + pageText)) titleScore += 30;
+    else if (/(^| )\d+ (sezon|season)( |$)/.test(candidateTitle + " " + slug)) titleScore -= 35;
   }
-  return score;
+  return Math.max(searchScore, titleScore);
 }
 
 function searchQueries(metadata, season) {
@@ -229,8 +230,13 @@ function searchSeries(metadata, season) {
 
     return requestText(BASE_URL + "/?s=" + encodeURIComponent(queries[index]), BASE_URL + "/")
       .then(function(html) {
+        var resultsStart = html.search(/<div[^>]+class=["'][^"']*listupd/i);
+        var resultsEnd = resultsStart >= 0 ? html.indexOf('<div id="sidebar', resultsStart) : -1;
+        var resultsHtml = resultsStart >= 0 && resultsEnd > resultsStart ? html.slice(resultsStart, resultsEnd) : "";
         var meaningfulRank = 0;
-        extractAnchors(html).forEach(function(anchor) {
+
+        // Sidebar önerilerini değil yalnızca gerçek WordPress arama sonuçlarını değerlendiririz.
+        extractAnchors(resultsHtml).forEach(function(anchor) {
           if (!/\/series\/[^/?#]+\/?(?:[?#].*)?$/i.test(anchor.url)) return;
           var url = absoluteUrl(anchor.url, BASE_URL + "/");
           var existing = null;
@@ -458,15 +464,10 @@ function extractStreamsFromPage(html, pageUrl, displayTitle) {
     });
   });
 
-  function resolveNext(index) {
-    if (directMedia.length || index >= references.length) return Promise.resolve([]);
-    return resolvePlayer(references[index], pageUrl).then(function(result) {
-      return result.media.length ? [result] : resolveNext(index + 1);
-    });
-  }
-
-  // İlk çalışan aynada durarak erişilemeyen yedek playerların Nuvio sonucunu geciktirmesini önleriz.
-  return resolveNext(0).then(function(results) {
+  // Tüm player aynalarını paralel deneyerek Nuvio'ya birden fazla kaynak sunarız.
+  return Promise.all(references.map(function(reference) {
+    return resolvePlayer(reference, pageUrl);
+  })).then(function(results) {
     results.forEach(function(result) {
       result.media.forEach(function(media) {
         streams.push({
