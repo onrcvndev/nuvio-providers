@@ -1,3 +1,4 @@
+// @ts-nocheck
 var PROVIDER_NAME = "CVN-AsyaAnimeleri";
 var BASE_URL = "https://asyaanimeleri.top";
 var TMDB_API_URL = "https://api.themoviedb.org/3";
@@ -87,39 +88,52 @@ function originOf(url) {
   return match ? match[1] : "";
 }
 
-function fetchMetadata(tmdbId, mediaType) {
-  var type = mediaType === "movie" ? "movie" : "tv";
-  var languages = ["tr-TR", "en-US", "ja-JP", "ko-KR", "zh-CN"];
-  var titles = [];
-  var year = null;
-  var chain = Promise.resolve();
+function resolveTmdbId(identifier, mediaType) {
+  var value = String(identifier || "");
+  if (!/^tt\d+$/i.test(value)) return Promise.resolve(value);
 
-  languages.forEach(function(language) {
+  var url = TMDB_API_URL + "/find/" + encodeURIComponent(value) + "?api_key=" + TMDB_API_KEY + "&external_source=imdb_id";
+  return requestJson(url).then(function(data) {
+    var results = mediaType === "movie" ? data.movie_results : data.tv_results;
+    if (!results || !results.length || !results[0].id) throw new Error("IMDb kimliği TMDB ile eşleştirilemedi");
+    return String(results[0].id);
+  });
+}
+
+function fetchMetadata(identifier, mediaType) {
+  return resolveTmdbId(identifier, mediaType).then(function(tmdbId) {
+    var type = mediaType === "movie" ? "movie" : "tv";
+    var languages = ["tr-TR", "en-US", "ja-JP", "ko-KR", "zh-CN"];
+    var titles = [];
+    var year = null;
+    var chain = Promise.resolve();
+
+    languages.forEach(function(language) {
+      chain = chain.then(function() {
+        var url = TMDB_API_URL + "/" + type + "/" + encodeURIComponent(String(tmdbId)) + "?api_key=" + TMDB_API_KEY + "&language=" + language;
+        return requestJson(url).then(function(data) {
+          if (data.title || data.name) titles.push(data.title || data.name);
+          if (data.original_title || data.original_name) titles.push(data.original_title || data.original_name);
+          if (!year) year = Number(String(data.release_date || data.first_air_date || "").slice(0, 4)) || null;
+        }).catch(function() {});
+      });
+    });
+
     chain = chain.then(function() {
-      var url = TMDB_API_URL + "/" + type + "/" + encodeURIComponent(String(tmdbId)) + "?api_key=" + TMDB_API_KEY + "&language=" + language;
+      var url = TMDB_API_URL + "/" + type + "/" + encodeURIComponent(String(tmdbId)) + "/alternative_titles?api_key=" + TMDB_API_KEY;
       return requestJson(url).then(function(data) {
-        if (data.title || data.name) titles.push(data.title || data.name);
-        if (data.original_title || data.original_name) titles.push(data.original_title || data.original_name);
-        if (!year) year = Number(String(data.release_date || data.first_air_date || "").slice(0, 4)) || null;
+        var alternatives = data.titles || data.results || [];
+        alternatives.forEach(function(item) {
+          if (item.title) titles.push(item.title);
+        });
       }).catch(function() {});
     });
-  });
 
-  chain = chain.then(function() {
-    var endpoint = type === "movie" ? "alternative_titles" : "alternative_titles";
-    var url = TMDB_API_URL + "/" + type + "/" + encodeURIComponent(String(tmdbId)) + "/" + endpoint + "?api_key=" + TMDB_API_KEY;
-    return requestJson(url).then(function(data) {
-      var alternatives = data.titles || data.results || [];
-      alternatives.forEach(function(item) {
-        if (item.title) titles.push(item.title);
-      });
-    }).catch(function() {});
-  });
-
-  return chain.then(function() {
-    titles = unique(titles).filter(function(title) { return normalize(title).length > 1; });
-    if (!titles.length) throw new Error("TMDB metadata bulunamadı");
-    return { titles: titles, year: year, displayTitle: titles[0] };
+    return chain.then(function() {
+      titles = unique(titles).filter(function(title) { return normalize(title).length > 1; });
+      if (!titles.length) throw new Error("TMDB metadata bulunamadı");
+      return { tmdbId: tmdbId, titles: titles, year: year, displayTitle: titles[0] };
+    });
   });
 }
 
@@ -155,14 +169,14 @@ function candidateScore(candidate, metadata, season) {
   metadata.titles.forEach(function(title) {
     var target = normalize(title);
     if (!target) return;
-    if (candidateTitle === target || slug === target) score = Math.max(score, 120);
-    else if (candidateTitle.indexOf(target) !== -1 || target.indexOf(candidateTitle) !== -1) score = Math.max(score, 85);
-    else if (slug.indexOf(target) !== -1 || target.indexOf(slug) !== -1) score = Math.max(score, 80);
+    if ((candidateTitle && candidateTitle === target) || (slug && slug === target)) score = Math.max(score, 120);
+    else if (candidateTitle && (candidateTitle.indexOf(target) !== -1 || target.indexOf(candidateTitle) !== -1)) score = Math.max(score, 85);
+    else if (slug && (slug.indexOf(target) !== -1 || target.indexOf(slug) !== -1)) score = Math.max(score, 80);
     else {
       var targetWords = target.split(" ");
       var hits = 0;
       targetWords.forEach(function(word) {
-        if (word.length > 1 && (candidateTitle.indexOf(word) !== -1 || slug.indexOf(word) !== -1)) hits += 1;
+        if (word.length > 1 && ((candidateTitle && candidateTitle.indexOf(word) !== -1) || (slug && slug.indexOf(word) !== -1))) hits += 1;
       });
       if (targetWords.length && hits / targetWords.length >= 0.7) score = Math.max(score, 55 + hits);
     }
@@ -405,11 +419,20 @@ function extractStreamsFromPage(html, pageUrl, displayTitle) {
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
+  var identifierParts = String(tmdbId || "").split(":");
+  var identifier = identifierParts[0];
+
+  // Nuvio/Stremio biçimindeki IMDb:sezon:bölüm girdisini doğrudan destekleriz.
+  if (identifierParts.length >= 3) {
+    season = Number(identifierParts[1]) || season;
+    episode = Number(identifierParts[2]) || episode;
+    mediaType = "tv";
+  }
   if (mediaType !== "tv" && mediaType !== "movie") return Promise.resolve([]);
 
   var metadata;
   var candidate;
-  return fetchMetadata(tmdbId, mediaType)
+  return fetchMetadata(identifier, mediaType)
     .then(function(result) {
       metadata = result;
       return searchSeries(metadata, mediaType === "tv" ? season : null);
