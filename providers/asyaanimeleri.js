@@ -106,6 +106,7 @@ function fetchMetadata(identifier, mediaType) {
     var languages = ["tr-TR", "en-US", "ja-JP", "ko-KR", "zh-CN"];
     var titles = [];
     var year = null;
+    var seasonEpisodeCounts = {};
     var chain = Promise.resolve();
 
     languages.forEach(function(language) {
@@ -115,6 +116,11 @@ function fetchMetadata(identifier, mediaType) {
           if (data.title || data.name) titles.push(data.title || data.name);
           if (data.original_title || data.original_name) titles.push(data.original_title || data.original_name);
           if (!year) year = Number(String(data.release_date || data.first_air_date || "").slice(0, 4)) || null;
+          (data.seasons || []).forEach(function(item) {
+            var seasonNumber = Number(item.season_number);
+            var episodeCount = Number(item.episode_count);
+            if (seasonNumber > 0 && episodeCount > 0) seasonEpisodeCounts[seasonNumber] = episodeCount;
+          });
         }).catch(function() {});
       });
     });
@@ -132,7 +138,7 @@ function fetchMetadata(identifier, mediaType) {
     return chain.then(function() {
       titles = unique(titles).filter(function(title) { return normalize(title).length > 1; });
       if (!titles.length) throw new Error("TMDB metadata bulunamadı");
-      return { tmdbId: tmdbId, titles: titles, year: year, displayTitle: titles[0] };
+      return { tmdbId: tmdbId, titles: titles, year: year, displayTitle: titles[0], seasonEpisodeCounts: seasonEpisodeCounts };
     });
   });
 }
@@ -163,7 +169,7 @@ function slugTitle(url) {
 function candidateScore(candidate, metadata, season) {
   var candidateTitle = normalize(candidate.title);
   var slug = normalize(slugTitle(candidate.url));
-  var score = 0;
+  var score = Number(candidate.searchScore || 0);
   var pageText = normalize(candidate.text);
 
   metadata.titles.forEach(function(title) {
@@ -223,14 +229,25 @@ function searchSeries(metadata, season) {
 
     return requestText(BASE_URL + "/?s=" + encodeURIComponent(queries[index]), BASE_URL + "/")
       .then(function(html) {
+        var meaningfulRank = 0;
         extractAnchors(html).forEach(function(anchor) {
           if (!/\/series\/[^/?#]+\/?(?:[?#].*)?$/i.test(anchor.url)) return;
           var url = absoluteUrl(anchor.url, BASE_URL + "/");
-          var exists = false;
+          var existing = null;
+          var hasText = Boolean(normalize(anchor.title + " " + anchor.text));
+          var searchScore = hasText ? Math.max(55, 70 - meaningfulRank * 5) : 0;
+          if (hasText) meaningfulRank += 1;
+
           candidates.forEach(function(item) {
-            if (item.url === url) exists = true;
+            if (item.url === url) existing = item;
           });
-          if (!exists) candidates.push({ url: url, title: anchor.title, text: anchor.text });
+          if (existing) {
+            if (!existing.title && anchor.title) existing.title = anchor.title;
+            if (!existing.text && anchor.text) existing.text = anchor.text;
+            existing.searchScore = Math.max(existing.searchScore || 0, searchScore);
+          } else {
+            candidates.push({ url: url, title: anchor.title, text: anchor.text, searchScore: searchScore });
+          }
         });
       })
       .catch(function() {})
@@ -241,7 +258,57 @@ function searchSeries(metadata, season) {
   return next(0);
 }
 
+function candidateMatchesSeason(candidate, season) {
+  if (!candidate || !season || Number(season) <= 1) return false;
+  var value = normalize((candidate.title || "") + " " + (candidate.text || "") + " " + slugTitle(candidate.url));
+  return new RegExp("(^| )" + Number(season) + " (sezon|season)( |$)").test(value);
+}
+
+function absoluteEpisodeNumber(metadata, season, episode) {
+  var targetSeason = Number(season || 1);
+  var absolute = Number(episode || 1);
+  var current;
+
+  if (targetSeason <= 1) return absolute;
+  for (current = 1; current < targetSeason; current += 1) {
+    var count = Number(metadata.seasonEpisodeCounts && metadata.seasonEpisodeCounts[current]);
+    if (!count) return 0;
+    absolute += count;
+  }
+  return absolute;
+}
+
+function findSeasonEpisodeUrl(detailHtml, season, episode, metadata) {
+  var targetSeason = Number(season || 1);
+  var targetEpisode = Number(episode || 1);
+  var matches = [];
+
+  extractAnchors(detailHtml).forEach(function(anchor) {
+    var value = normalize((anchor.text || "") + " " + (anchor.title || "") + " " + (anchor.url || ""));
+    var seasonPattern = new RegExp("(^| )" + targetSeason + " (sezon|season)( |$)");
+    var episodePattern = new RegExp("(^| )" + targetEpisode + " (bolum|blm)( |$)");
+    if (!seasonPattern.test(value) || !episodePattern.test(value)) return;
+
+    var score = 120;
+    metadata.titles.forEach(function(title) {
+      var normalizedTitle = normalize(title);
+      if (normalizedTitle && value.indexOf(normalizedTitle) !== -1) score += 10;
+    });
+    matches.push({ url: absoluteUrl(anchor.url, BASE_URL + "/"), score: score });
+  });
+
+  matches.sort(function(left, right) { return right.score - left.score; });
+  return matches.length ? matches[0].url : "";
+}
+
 function episodeNumbers(anchor) {
+  var displayValue = decodeHtml((anchor.text || "") + " " + (anchor.title || ""))
+    .toLowerCase()
+    .replace(/bölüm/g, "bolum")
+    .replace(/[^a-z0-9.-]+/g, " ")
+    .trim();
+  var leadingRange = displayValue.match(/^(\d+)\s*-\s*(\d+)(?: |$)/);
+  var leadingExact = displayValue.match(/^(\d+)(?: |$)/);
   var value = decodeHtml((anchor.text || "") + " " + (anchor.title || "") + " " + (anchor.url || ""))
     .toLowerCase()
     .replace(/bölüm/g, "bolum")
@@ -251,6 +318,9 @@ function episodeNumbers(anchor) {
   var expression = /(?:^|[ .-])(\d+)\s*\.?\s*(?:bolum|blm)(?: |[./-]|$)/gi;
   var match;
 
+  // Birleşik seri sayfalarında kartın başındaki sayı mutlak bölüm numarasıdır.
+  if (leadingRange) return { start: Number(leadingRange[1]), end: Number(leadingRange[2]) };
+  if (leadingExact) return { start: Number(leadingExact[1]), end: Number(leadingExact[1]) };
   if (range) return { start: Number(range[1]), end: Number(range[2]) };
   while ((match = expression.exec(value))) exactMatches.push(Number(match[1]));
   if (exactMatches.length) return { start: exactMatches[exactMatches.length - 1], end: exactMatches[exactMatches.length - 1] };
@@ -418,6 +488,45 @@ function extractStreamsFromPage(html, pageUrl, displayTitle) {
   });
 }
 
+function episodeUrlForPage(detailHtml, candidate, metadata, mediaType, season, episode) {
+  if (mediaType === "movie") return findEpisodeUrl(detailHtml, 1, metadata);
+
+  var targetSeason = Number(season || 1);
+  var targetEpisode = Number(episode || 1);
+  if (targetSeason > 1) {
+    var seasonEpisodeUrl = findSeasonEpisodeUrl(detailHtml, targetSeason, targetEpisode, metadata);
+    if (seasonEpisodeUrl) return seasonEpisodeUrl;
+
+    if (candidateMatchesSeason(candidate, targetSeason)) {
+      var localEpisodeUrl = findEpisodeUrl(detailHtml, targetEpisode, metadata);
+      if (localEpisodeUrl) return localEpisodeUrl;
+    }
+
+    var absoluteEpisode = absoluteEpisodeNumber(metadata, targetSeason, targetEpisode);
+    if (absoluteEpisode) {
+      var absoluteEpisodeUrl = findEpisodeUrl(detailHtml, absoluteEpisode, metadata);
+      if (absoluteEpisodeUrl) return absoluteEpisodeUrl;
+    }
+  }
+
+  return findEpisodeUrl(detailHtml, targetEpisode, metadata);
+}
+
+function streamsForCandidate(candidate, metadata, mediaType, season, episode) {
+  return requestText(candidate.url, BASE_URL + "/").then(function(detailHtml) {
+    var episodeUrl = episodeUrlForPage(detailHtml, candidate, metadata, mediaType, season, episode);
+    var displayTitle = metadata.displayTitle + (mediaType === "tv" ? " S" + Number(season || 1) + "E" + Number(episode || 1) : "");
+
+    if (episodeUrl) {
+      return requestText(episodeUrl, candidate.url).then(function(episodeHtml) {
+        return extractStreamsFromPage(episodeHtml, episodeUrl, displayTitle);
+      });
+    }
+    if (mediaType === "movie") return extractStreamsFromPage(detailHtml, candidate.url, displayTitle);
+    return null;
+  });
+}
+
 function getStreams(tmdbId, mediaType, season, episode) {
   var identifierParts = String(tmdbId || "").split(":");
   var identifier = identifierParts[0];
@@ -440,17 +549,21 @@ function getStreams(tmdbId, mediaType, season, episode) {
     .then(function(result) {
       candidate = result;
       if (!candidate) throw new Error("AsyaAnimeleri eşleşmesi bulunamadı");
-      return requestText(candidate.url, BASE_URL + "/");
+      return streamsForCandidate(candidate, metadata, mediaType, season, episode);
     })
-    .then(function(detailHtml) {
-      var episodeUrl = findEpisodeUrl(detailHtml, mediaType === "tv" ? episode : 1, metadata);
-      if (episodeUrl) {
-        return requestText(episodeUrl, candidate.url).then(function(episodeHtml) {
-          return extractStreamsFromPage(episodeHtml, episodeUrl, metadata.displayTitle + (mediaType === "tv" ? " S" + Number(season || 1) + "E" + Number(episode || 1) : ""));
+    .then(function(streams) {
+      if (streams !== null) return streams;
+      if (mediaType !== "tv" || Number(season || 1) <= 1) throw new Error("Hedef bölüm bulunamadı");
+
+      // Sezon sayfası bulunamadığında birleşik seri sayfasını mutlak bölüm numarasıyla deneriz.
+      return searchSeries(metadata, null).then(function(genericCandidate) {
+        if (!genericCandidate) throw new Error("Birleşik seri sayfası bulunamadı");
+        if (genericCandidate.url === candidate.url) throw new Error("Hedef bölüm bulunamadı");
+        return streamsForCandidate(genericCandidate, metadata, mediaType, season, episode).then(function(fallbackStreams) {
+          if (fallbackStreams === null) throw new Error("Birleşik seride hedef bölüm bulunamadı");
+          return fallbackStreams;
         });
-      }
-      if (mediaType === "movie") return extractStreamsFromPage(detailHtml, candidate.url, metadata.displayTitle);
-      throw new Error("Hedef bölüm bulunamadı");
+      });
     })
     .catch(function(error) {
       console.error("[" + PROVIDER_NAME + "] " + (error && error.message ? error.message : String(error)));
