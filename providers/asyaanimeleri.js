@@ -399,13 +399,107 @@ function extractPlayerReferences(html, pageUrl) {
   }).slice(0, 10);
 }
 
+function readPackedString(source, start) {
+  var quote = source.charAt(start);
+  var index = start + 1;
+  var value = "";
+
+  while (index < source.length) {
+    var character = source.charAt(index++);
+    if (character === quote) return { value: value, next: index };
+    if (character !== "\\") {
+      value += character;
+      continue;
+    }
+
+    var escaped = source.charAt(index++);
+    if (escaped === "n") value += "\n";
+    else if (escaped === "r") value += "\r";
+    else if (escaped === "t") value += "\t";
+    else if (escaped === "x") {
+      value += String.fromCharCode(parseInt(source.substr(index, 2), 16));
+      index += 2;
+    } else if (escaped === "u") {
+      value += String.fromCharCode(parseInt(source.substr(index, 4), 16));
+      index += 4;
+    } else value += escaped;
+  }
+  return { value: value, next: source.length };
+}
+
+function packedToken(value, radix) {
+  var token = "";
+  var number = Number(value);
+  if (number >= radix) token += packedToken(Math.floor(number / radix), radix);
+  number %= radix;
+  token += number > 35 ? String.fromCharCode(number + 29) : number.toString(36);
+  return token;
+}
+
+function unpackScripts(source) {
+  var text = String(source || "");
+  var output = text;
+  var marker = "eval(function(p,a,c,k,e,d){";
+  var searchFrom = 0;
+  var start;
+
+  while ((start = text.indexOf(marker, searchFrom)) !== -1) {
+    var argsStart = text.indexOf("}(" , start + marker.length);
+    if (argsStart === -1) break;
+    var packed = readPackedString(text, argsStart + 2);
+    if (!packed || packed.next >= text.length) break;
+
+    var cursor = packed.next;
+    while (/\s/.test(text.charAt(cursor))) cursor += 1;
+    if (text.charAt(cursor) === ",") cursor += 1;
+    while (/\s/.test(text.charAt(cursor))) cursor += 1;
+    var radixEnd = text.indexOf(",", cursor);
+    if (radixEnd === -1) break;
+    var radix = Number(text.slice(cursor, radixEnd));
+    cursor = radixEnd + 1;
+    while (/\s/.test(text.charAt(cursor))) cursor += 1;
+    var countEnd = text.indexOf(",", cursor);
+    if (countEnd === -1) break;
+    var count = Number(text.slice(cursor, countEnd));
+    cursor = countEnd + 1;
+    while (/\s/.test(text.charAt(cursor))) cursor += 1;
+    var dictionary = readPackedString(text, cursor);
+    if (!dictionary || text.substr(dictionary.next, 12).indexOf(".split") === -1) break;
+
+    var words = dictionary.value.split("|");
+    var decoded = packed.value;
+    var index;
+    for (index = count - 1; index >= 0; index -= 1) {
+      var token = packedToken(index, radix);
+      var word = words[index] || token;
+      if (!word) continue;
+      decoded = decoded.replace(new RegExp("\\b" + token + "\\b", "g"), word);
+    }
+    output += "\n" + decoded;
+    searchFrom = dictionary.next;
+  }
+  return output;
+}
+
+function extractGoogleDriveMedia(source) {
+  var text = decodeEscapedSource(source);
+  var idMatch = text.match(/drive\.google\.com\/file\/d\/([A-Za-z0-9_-]+)/i) || text.match(/name=["']id["'][^>]*value=["']([A-Za-z0-9_-]+)["']/i);
+  var downloadMatch = text.match(/https?:\/\/drive\.usercontent\.google\.com\/(?:uc|download)[^"'<>\s]*/i);
+  var uuidMatch = text.match(/name=["']uuid["'][^>]*value=["']([^"']+)["']/i);
+  var url = downloadMatch ? downloadMatch[0].replace(/&amp;/gi, "&") : "";
+
+  if (!url && idMatch) url = "https://drive.usercontent.google.com/download?id=" + idMatch[1] + "&export=download";
+  if (url && idMatch && url.indexOf("id=") === -1) url += (url.indexOf("?") === -1 ? "?" : "&") + "id=" + idMatch[1];
+  if (!url) return [];
+  if (uuidMatch && url.indexOf("confirm=") === -1) url += "&confirm=t&uuid=" + encodeURIComponent(uuidMatch[1]);
+  return [{ url: url, quality: "Auto" }];
+}
+
 function decodeEscapedSource(value) {
   return decodeHtml(String(value || ""))
-    .replace(/\\u0026/gi, "&")
-    .replace(/\\u002f/gi, "/")
-    .replace(/\\\//g, "/")
-    .replace(/\\x26/gi, "&")
-    .replace(/\\x2f/gi, "/");
+    .replace(/\\u([0-9a-f]{4})/gi, function(_, code) { return String.fromCharCode(parseInt(code, 16)); })
+    .replace(/\\x([0-9a-f]{2})/gi, function(_, code) { return String.fromCharCode(parseInt(code, 16)); })
+    .replace(/\\\//g, "/");
 }
 
 function qualityFromContext(source, position, url) {
@@ -416,15 +510,25 @@ function qualityFromContext(source, position, url) {
 }
 
 function extractMediaUrls(source, baseUrl) {
-  var decoded = decodeEscapedSource(source);
-  var media = [];
-  var expression = /https?:\/\/[^"'<>\s\\]+?(?:\.m3u8|\.mp4|\.m4v)(?:\?[^"'<>\s\\]*)?/gi;
+  var unpacked = unpackScripts(source);
+  var decoded = decodeEscapedSource(unpacked);
+  var media = extractGoogleDriveMedia(decoded);
+  var expression = /(?:https?:)?\/\/[^"'<>\s\\]+?(?:\.(?:m3u8|mp4|m4v|webm))(?:\?[^"'<>\s\\]*)?/gi;
+  var relativeExpression = /["']((?:\/|\.\/|\.\.\/)[^"']+?\.(?:m3u8|mp4|m4v|webm)(?:\?[^"']*)?)["']/gi;
   var match;
+
+  try {
+    decoded = decodeURIComponent(decoded);
+  } catch (_) {}
 
   while ((match = expression.exec(decoded))) {
     var url = match[0].replace(/[),;]+$/, "");
     if (/\.(?:jpg|jpeg|png|webp)(?:\?|$)/i.test(url)) continue;
     media.push({ url: absoluteUrl(url, baseUrl), quality: qualityFromContext(decoded, match.index, url) });
+  }
+
+  while ((match = relativeExpression.exec(decoded))) {
+    media.push({ url: absoluteUrl(match[1], baseUrl), quality: qualityFromContext(decoded, match.index, match[1]) });
   }
 
   var uniqueMedia = [];
@@ -438,14 +542,80 @@ function extractMediaUrls(source, baseUrl) {
   return uniqueMedia;
 }
 
+function resolveGoogleDriveMedia(source, pageUrl) {
+  var initial = extractGoogleDriveMedia(source);
+  if (!initial.length) return Promise.resolve([]);
+
+  return Promise.all(initial.map(function(item) {
+    return fetch(item.url, {
+      method: "GET",
+      headers: { Accept: "text/html,video/*,*/*;q=0.8", "User-Agent": USER_AGENT, Referer: pageUrl }
+    }).then(function(response) {
+      var contentType = String(response.headers.get("content-type") || "").toLowerCase();
+      if (/video\//i.test(contentType) || /mpegurl|octet-stream/i.test(contentType)) return item;
+      return response.text().then(function(downloadPage) {
+        var confirmed = extractGoogleDriveMedia(downloadPage);
+        return confirmed.length ? confirmed[0] : item;
+      });
+    }).catch(function() {
+      return item;
+    });
+  }));
+}
+
+function resolveVipMedia(referenceUrl, episodeUrl) {
+  var match = String(referenceUrl || "").match(/^https?:\/\/([^/]*asyaanimeleri\.pw)\/video\/([A-Za-z0-9_-]+)/i);
+  if (!match) return Promise.resolve([]);
+
+  var host = "https://" + match[1];
+  var id = match[2];
+  var endpoint = host + "/player/index.php?data=" + encodeURIComponent(id) + "&do=getVideo";
+  var body = "hash=" + encodeURIComponent(id) + "&r=" + encodeURIComponent(episodeUrl || referenceUrl);
+
+  return fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Accept: "application/json,text/plain,*/*",
+      "Content-Type": "application/x-www-form-urlencoded",
+      "User-Agent": USER_AGENT,
+      "X-Requested-With": "XMLHttpRequest",
+      Referer: referenceUrl,
+      Origin: host
+    },
+    body: body
+  }).then(function(response) {
+    if (!response.ok) throw new Error("VIP HTTP " + response.status);
+    return response.json();
+  }).then(function(data) {
+    var media = [];
+    if (data && data.securedLink) media.push({ url: data.securedLink, quality: "Auto" });
+    if (data && data.videoSource && /\.(?:m3u8|mp4|m4v)(?:\?|$)/i.test(data.videoSource)) media.push({ url: data.videoSource, quality: "Auto" });
+    return media;
+  }).catch(function() {
+    return [];
+  });
+}
+
 function resolvePlayer(reference, episodeUrl) {
   var direct = extractMediaUrls(reference.url, episodeUrl);
-  if (direct.length) return Promise.resolve({ reference: reference, media: direct });
+  var isGoogleDrive = /drive\.google\.com\/file\/d\//i.test(reference.url);
 
-  return requestText(reference.url, episodeUrl).then(function(playerHtml) {
-    return { reference: reference, media: extractMediaUrls(playerHtml, reference.url) };
-  }).catch(function() {
-    return { reference: reference, media: [] };
+  // Asya VIP iframe'i kendi AJAX endpointinden imzalı HLS kök linki üretir.
+  return resolveVipMedia(reference.url, episodeUrl).then(function(vipMedia) {
+    if (vipMedia.length) return { reference: reference, media: vipMedia };
+    if (direct.length && !isGoogleDrive) return { reference: reference, media: direct };
+
+    return requestText(reference.url, episodeUrl).then(function(playerHtml) {
+      if (isGoogleDrive) {
+        return resolveGoogleDriveMedia(playerHtml, reference.url).then(function(googleMedia) {
+          return { reference: reference, media: googleMedia.length ? googleMedia : direct };
+        });
+      }
+      var media = extractMediaUrls(playerHtml, reference.url);
+      return { reference: reference, media: media.length ? media : direct };
+    }).catch(function() {
+      return { reference: reference, media: direct };
+    });
   });
 }
 
