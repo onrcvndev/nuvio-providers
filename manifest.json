@@ -72,6 +72,29 @@
       ],
       "limited": false,
       "disabledPlatforms": []
+    },
+    {
+      "id": "webdramaturkey",
+      "name": "CVN-WebDramaTurkey",
+      "description": "WebDramaTurkey için doğrudan web scraper Nuvio provider'ı.",
+      "version": "1.0.0",
+      "author": "Onur Civanoglu",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/webdramaturkey.js",
+      "enabled": true,
+      "formats": [
+        "mp4",
+        "hls",
+        "m3u8"
+      ],
+      "contentLanguage": [
+        "tr"
+      ],
+      "limited": false,
+      "disabledPlatforms": []
     }
   ]
 }
