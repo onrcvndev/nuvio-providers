@@ -7,7 +7,7 @@
       "name": "CVN-AsyaAnimeleri",
       "description": "AsyaAnimeleri için doğrudan web scraper Nuvio provider'ı.",
       "version": "1.0.0",
-      "author": "Onur Civanoglu",
+      "author": "onrcvndev",
       "supportedTypes": [
         "movie",
         "tv"
@@ -31,7 +31,7 @@
       "name": "CVN-DiziBOX",
       "description": "DiziBOX için doğrudan web scraper Nuvio provider'ı.",
       "version": "1.0.0",
-      "author": "Onur Civanoglu",
+      "author": "onrcvndev",
       "supportedTypes": [
         "tv"
       ],
@@ -54,7 +54,7 @@
       "name": "CVN-HDFilmCehennemi",
       "description": "HDFilmCehennemi için doğrudan web scraper Nuvio provider'ı.",
       "version": "1.0.0",
-      "author": "Onur Civanoglu",
+      "author": "onrcvndev",
       "supportedTypes": [
         "movie",
         "tv"
@@ -78,7 +78,7 @@
       "name": "CVN-WebDramaTurkey",
       "description": "WebDramaTurkey için doğrudan web scraper Nuvio provider'ı.",
       "version": "1.0.0",
-      "author": "Onur Civanoglu",
+      "author": "onrcvndev",
       "supportedTypes": [
         "movie",
         "tv"
