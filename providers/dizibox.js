@@ -24,12 +24,20 @@ function fetchWithTimeout(url, options, milliseconds) {
   });
 }
 
+function isCloudflareChallenge(html) {
+  return /<title[^>]*>\s*(?:just a moment|attention required)|cf-chl|challenge-platform|checking your browser/i.test(String(html || ""));
+}
+
 function requestText(url, referer) {
   var headers = { Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8", "User-Agent": USER_AGENT };
   if (referer) headers.Referer = referer;
-  return fetchWithTimeout(url, { method: "GET", headers: headers }, 10000).then(function(response) {
+  return fetchWithTimeout(url, { method: "GET", headers: headers }, 6000).then(function(response) {
     if (!response.ok) throw new Error("HTTP " + response.status + " for " + url);
     return response.text();
+  }).then(function(html) {
+    // Cloudflare'ın tarayıcı challenge'ı Hermes fetch ile çözülemez; boş HTML'yi içerik sayfası sanmıyoruz.
+    if (isCloudflareChallenge(html)) throw new Error("DiziBOX Cloudflare challenge");
+    return html;
   });
 }
 
@@ -274,14 +282,14 @@ function searchDirectDizibox(metadata, candidates) {
 
 function searchSeries(metadata, mediaType, season) {
   var candidates = [];
-  return Promise.all(searchQueries(metadata, mediaType, season).map(function(query) {
-    return withTimeout(requestText(BASE_URL + "/?s=" + encodeURIComponent(query), BASE_URL + "/"), 8000)
+  // Çok sayıda paralel arama Cloudflare rate-limit'ini tetiklediği için en güçlü üç başlıkla sınırlıyoruz.
+  var queries = searchQueries(metadata, mediaType, season).slice(0, 3);
+  return Promise.all(queries.map(function(query) {
+    return withTimeout(requestText(BASE_URL + "/?s=" + encodeURIComponent(query), BASE_URL + "/"), 6500)
       .then(function(html) { if (html) collectDiziboxCandidates(html, candidates); })
       .catch(function() {});
   })).then(function() {
-    var ranked = rankCandidates(candidates, metadata, season);
-    if (ranked) return ranked;
-    return searchDirectDizibox(metadata, candidates).then(function() { return rankCandidates(candidates, metadata, season); });
+    return rankCandidates(candidates, metadata, season);
   });
 }
 

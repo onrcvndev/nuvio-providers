@@ -1,4 +1,4 @@
-var BASE_URL = "https://www.hdfilmcehennemi.nl";
+var BASE_URL = "https://www.hdfilmcehennemi.now";
 var PROVIDER_NAME = "CVN-HDFilmCehennemi";
 var TMDB_API_URL = "https://api.themoviedb.org/3";
 var TMDB_API_KEY = "4ef0d7355d9ffb5151e987764708ce96";
@@ -117,11 +117,77 @@ function extractPlayerReferences(source, baseUrl) {
     var urlMatch = match[2].match(/(?:src|data-src|data-url)\s*=\s*["']([^"']+)["']/i);
     if (!urlMatch) continue;
     var url = absoluteUrl(urlMatch[1], baseUrl);
-    if (!url || /javascript:|about:blank/i.test(url)) continue;
+    // Detay sayfasındaki YouTube iframe'i fragmandır; oynatılabilir kaynak olarak dönmemelidir.
+    if (!url || /javascript:|about:blank|(?:youtube\.com|youtu\.be)\//i.test(url)) continue;
     if (references.some(function(item) { return item.url === url; })) continue;
     references.push({ url: url, label: "Player" });
   }
   return references;
+}
+
+function attributeValue(attributes, name) {
+  var expression = new RegExp("\\b" + name + "\\s*=\\s*(?:[\\\"']([^\\\"']+)[\\\"']|([^\\s>]+))", "i");
+  var match = String(attributes || "").match(expression);
+  return match ? match[1] || match[2] : "";
+}
+
+function extractHdfPlayerSources(html, pageUrl) {
+  var source = String(html || "");
+  var configMatch = source.match(/videoAjax\s*=\s*\{([\s\S]*?)\}/i);
+  var config = configMatch ? configMatch[1] : "";
+  var ajaxUrl = absoluteUrl(attributeValue(config, "ajaxurl") || (config.match(/ajaxurl\s*:\s*["']([^"']+)/i) || [])[1], pageUrl);
+  var nonce = attributeValue(config, "nonce") || (config.match(/nonce\s*:\s*["']([^"']+)/i) || [])[1] || "";
+  var players = [];
+  var expression = /<(?:a|button|div)\b([^>]*\bdata-post-id\s*=\s*(?:["'][^"']+["']|[^\s>]+)[^>]*)>/gi;
+  var match;
+
+  if (!ajaxUrl || !nonce) return players;
+  while ((match = expression.exec(source))) {
+    var postId = attributeValue(match[1], "data-post-id");
+    var playerName = attributeValue(match[1], "data-player-name");
+    var partKey = attributeValue(match[1], "data-part-key");
+    if (!postId || !playerName || players.some(function(item) { return item.postId === postId && item.playerName === playerName && item.partKey === partKey; })) continue;
+    players.push({ ajaxUrl: ajaxUrl, nonce: nonce, postId: postId, playerName: playerName, partKey: partKey || "" });
+  }
+  return players.slice(0, 12);
+}
+
+function requestHdfPlayerUrl(source, pageUrl, refresh) {
+  var body = "action=get_video_url"
+    + "&nonce=" + encodeURIComponent(source.nonce)
+    + "&post_id=" + encodeURIComponent(source.postId)
+    + "&player_name=" + encodeURIComponent(source.playerName)
+    + "&part_key=" + encodeURIComponent(source.partKey || "");
+  if (refresh) body += "&taze=1";
+
+  return fetch(source.ajaxUrl, {
+    method: "POST",
+    headers: {
+      Accept: "application/json, text/javascript, */*; q=0.01",
+      "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+      "X-Requested-With": "XMLHttpRequest",
+      Referer: pageUrl,
+      "User-Agent": USER_AGENT
+    },
+    body: body
+  }).then(function(response) {
+    if (!response.ok) throw new Error("HTTP " + response.status + " for " + source.ajaxUrl);
+    return response.json();
+  }).then(function(payload) {
+    var url = payload && payload.success && payload.data && payload.data.url;
+    return url ? absoluteUrl(url, source.ajaxUrl) : "";
+  });
+}
+
+function resolveHdfPlayerSource(source, pageUrl, refresh) {
+  return requestHdfPlayerUrl(source, pageUrl, refresh).then(function(playerUrl) {
+    if (!playerUrl) return { reference: { label: source.playerName }, media: [] };
+    return resolvePlayer({ url: playerUrl, label: source.playerName }, pageUrl).then(function(result) {
+      // Kaynak paneli kısa süreli ölü token üretebildiği için, sadece boş sonuçta bir kez yeniliyoruz.
+      if ((!result || !(result.media || []).length) && !refresh) return resolveHdfPlayerSource(source, pageUrl, true);
+      return result || { reference: { label: source.playerName }, media: [] };
+    });
+  }).catch(function() { return { reference: { label: source.playerName }, media: [] }; });
 }
 
 function withTimeout(promise, milliseconds) {
@@ -236,25 +302,21 @@ function collectHdfCandidates(payload, candidates, mediaType) {
 }
 
 function isHdfCandidateUrl(url, mediaType) {
-  var path = String(url || "").replace(BASE_URL, "");
-  if (mediaType === "tv") return /\/dizi\/[^/?#]+\/?$/i.test(path);
-  if (/\/(?:category|dizi|yil|film-robotu|yabancidiziizle|search|wp-|assets|dist)\//i.test(path)) return false;
+  var path = String(url || "").replace(/^https?:\/\/[^/]+/i, "");
+  if (mediaType === "tv") return /^\/dizi\/[^/?#]+\/?$/i.test(path);
+
+  // Yeni kaynakta film detayları kök slug yerine /film/<slug>/ altında yayınlanıyor.
+  if (/^\/film\/[^/?#]+\/?$/i.test(path)) return true;
+  if (/\/(?:category|dizi|film|bolum|yil|film-robotu|yabancidiziizle|search|wp-|assets|dist)\//i.test(path)) return false;
   return /^\/[^/?#]+\/?$/i.test(path);
 }
 
 function requestHdfSearch(query) {
-  var encoded = encodeURIComponent(query);
-  var urls = [BASE_URL + "/search?q=" + encoded, BASE_URL + "/search?query=" + encoded, BASE_URL + "/search?s=" + encoded];
-  var headers = { Accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "fetch", "User-Agent": USER_AGENT };
-  function next(index) {
-    if (index >= urls.length) return Promise.resolve(null);
-    return requestJson(urls[index], headers).then(function(data) {
-      var label = normalize(stripTags(data && data.query));
-      if (data && (data.results || data.html) && !/populer aramalar|popular searches/i.test(label)) return data;
-      return next(index + 1);
-    }).catch(function() { return next(index + 1); });
-  }
-  return next(0);
+  // .now kaynağı eski JSON endpointleri yerine WordPress'in HTML arama sayfasını döndürüyor.
+  return requestText(BASE_URL + "/?s=" + encodeURIComponent(query), BASE_URL + "/").then(function(html) {
+    if (!html || /just a moment|cf-chl|challenge-platform/i.test(html)) return null;
+    return html;
+  }).catch(function() { return null; });
 }
 
 function searchSeries(metadata, mediaType, season) {
@@ -334,11 +396,18 @@ function extractStreamsFromPage(html, pageUrl, displayTitle) {
   extractMediaUrls(html, pageUrl).forEach(function(media) {
     streams.push({ name: PROVIDER_NAME + " - Direct", title: displayTitle + " - Direct - " + media.quality, url: media.url, quality: media.quality, headers: { Referer: pageUrl, Origin: originOf(pageUrl), "User-Agent": USER_AGENT } });
   });
+
   var references = extractPlayerReferences(html, pageUrl);
-  return Promise.all(references.map(function(reference) { return resolvePlayer(reference, pageUrl); })).then(function(results) {
+  var playerSources = extractHdfPlayerSources(html, pageUrl);
+  var resolutions = references.map(function(reference) { return resolvePlayer(reference, pageUrl); });
+  playerSources.forEach(function(source) { resolutions.push(resolveHdfPlayerSource(source, pageUrl, false)); });
+
+  return Promise.all(resolutions).then(function(results) {
     results.forEach(function(result) {
       (result.media || []).forEach(function(media) {
-        streams.push({ name: PROVIDER_NAME + " - " + result.reference.label, title: displayTitle + " - " + result.reference.label + " - " + media.quality, url: media.url, quality: media.quality, headers: { Referer: result.reference.url, Origin: originOf(result.reference.url), "User-Agent": USER_AGENT } });
+        var reference = result.reference || {};
+        var referer = reference.url || pageUrl;
+        streams.push({ name: PROVIDER_NAME + " - " + (reference.label || "Player"), title: displayTitle + " - " + (reference.label || "Player") + " - " + media.quality, url: media.url, quality: media.quality, headers: { Referer: referer, Origin: originOf(referer), "User-Agent": USER_AGENT } });
       });
     });
     return uniqueStreams(streams);
