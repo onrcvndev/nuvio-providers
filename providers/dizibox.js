@@ -3,6 +3,9 @@ var PROVIDER_NAME = "CVN-DiziBOX";
 var TMDB_API_URL = "https://api.themoviedb.org/3";
 var TMDB_API_KEY = "4ef0d7355d9ffb5151e987764708ce96";
 var USER_AGENT = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36";
+var MAX_PROXY_ATTEMPTS = 3;
+// Güvenilir browser-capable proxy varsa bu şablona veya globalThis.CVN_DIZIBOX_PROXY_URL değerine yazılır.
+var PROXY_URL_TEMPLATE = "";
 
 function fetchWithTimeout(url, options, milliseconds) {
   var requestOptions = options || {};
@@ -28,6 +31,62 @@ function isCloudflareChallenge(html) {
   return /<title[^>]*>\s*(?:just a moment|attention required)|cf-chl|challenge-platform|checking your browser/i.test(String(html || ""));
 }
 
+function proxyTemplate() {
+  if (PROXY_URL_TEMPLATE) return PROXY_URL_TEMPLATE;
+  if (typeof globalThis === "undefined") return "";
+  return globalThis.CVN_DIZIBOX_PROXY_URL || globalThis.DIZIBOX_PROXY_URL || "";
+}
+
+function proxyUrls(targetUrl) {
+  var configured = proxyTemplate();
+  var urls = [];
+  if (configured) {
+    urls.push(configured
+      .replace(/\{encoded_url\}|\{url\}/gi, encodeURIComponent(targetUrl))
+      .replace(/\{raw_url\}/gi, targetUrl));
+    if (urls[0] === configured) urls[0] = configured + encodeURIComponent(targetUrl);
+  }
+
+  // Yapılandırılmış browser-capable proxy önceliklidir; public fallback'ler yalnızca son çare olarak kullanılır.
+  urls.push("https://api.allorigins.win/raw?url=" + encodeURIComponent(targetUrl));
+  urls.push("https://r.jina.ai/http://" + targetUrl.replace(/^https?:\/\//i, ""));
+  urls.push("https://corsproxy.io/?url=" + encodeURIComponent(targetUrl));
+  return unique(urls).slice(0, MAX_PROXY_ATTEMPTS);
+}
+
+function isProxyEligibleError(error) {
+  return /Cloudflare|challenge|timeout|HTTP (403|429|503)/i.test(error && error.message ? error.message : String(error));
+}
+
+function isProxyFailureBody(html) {
+  return /warning:\s*target url returned error|proxy(?:_|\s)error|target url is unavailable|request failed/i.test(String(html || ""));
+}
+
+function requestViaProxy(url, referer) {
+  var urls = proxyUrls(url);
+  var headers = {
+    Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    "User-Agent": USER_AGENT
+  };
+  if (referer) headers.Referer = referer;
+
+  function next(index) {
+    if (index >= urls.length) return Promise.reject(new Error("DiziBOX proxy fallback başarısız"));
+    return fetchWithTimeout(urls[index], { method: "GET", headers: headers }, 10000)
+      .then(function(response) {
+        if (!response.ok) throw new Error("Proxy HTTP " + response.status);
+        return response.text();
+      })
+      .then(function(html) {
+        if (!html || isCloudflareChallenge(html) || isProxyFailureBody(html)) throw new Error("Proxy geçersiz yanıt");
+        return html;
+      })
+      .catch(function() { return next(index + 1); });
+  }
+
+  return next(0);
+}
+
 function requestText(url, referer) {
   var headers = { Accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8", "User-Agent": USER_AGENT };
   if (referer) headers.Referer = referer;
@@ -35,9 +94,12 @@ function requestText(url, referer) {
     if (!response.ok) throw new Error("HTTP " + response.status + " for " + url);
     return response.text();
   }).then(function(html) {
-    // Cloudflare'ın tarayıcı challenge'ı Hermes fetch ile çözülemez; boş HTML'yi içerik sayfası sanmıyoruz.
+    // Cloudflare'ın tarayıcı challenge'ı Hermes fetch ile çözülemez; proxy yalnızca bu durumda devreye girer.
     if (isCloudflareChallenge(html)) throw new Error("DiziBOX Cloudflare challenge");
     return html;
+  }).catch(function(error) {
+    if (!isProxyEligibleError(error)) throw error;
+    return requestViaProxy(url, referer);
   });
 }
 
@@ -99,13 +161,22 @@ function originOf(url) {
 
 function extractAnchors(html) {
   var anchors = [];
+  var source = String(html || "");
   var expression = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
   var match;
-  while ((match = expression.exec(String(html || "")))) {
+  while ((match = expression.exec(source))) {
     var href = match[1].match(/href\s*=\s*["']([^"']+)["']/i);
     var title = match[1].match(/title\s*=\s*["']([^"']+)["']/i);
     if (!href) continue;
     anchors.push({ url: decodeHtml(href[1]), title: stripTags(title ? title[1] : ""), text: stripTags(match[2]) });
+  }
+
+  // Bazı proxy'ler HTML yerine Markdown döndürür; aday linkleri bu formatta da kaybetmiyoruz.
+  var markdown = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/gi;
+  while ((match = markdown.exec(source))) {
+    var markdownUrl = decodeHtml(match[2]);
+    if (anchors.some(function(anchor) { return anchor.url === markdownUrl; })) continue;
+    anchors.push({ url: markdownUrl, title: stripTags(match[1]), text: stripTags(match[1]) });
   }
   return anchors;
 }
