@@ -619,14 +619,14 @@ function resolvePlayer(reference, episodeUrl) {
   });
 }
 
-function extractStreamsFromPage(html, pageUrl, displayTitle) {
+function extractStreamsFromPage(html, pageUrl, displayTitle, episodeTitle) {
   var references = extractPlayerReferences(html, pageUrl);
   var directMedia = extractMediaUrls(html, pageUrl);
   var streams = [];
 
   directMedia.forEach(function(media) {
     streams.push({
-      name: PROVIDER_NAME + " - Direct",
+      name: streamName("Direct", episodeTitle),
       title: displayTitle + " - " + media.quality,
       url: media.url,
       quality: media.quality,
@@ -641,7 +641,7 @@ function extractStreamsFromPage(html, pageUrl, displayTitle) {
     results.forEach(function(result) {
       result.media.forEach(function(media) {
         streams.push({
-          name: PROVIDER_NAME + " - " + result.reference.label,
+          name: streamName(result.reference.label, episodeTitle),
           title: displayTitle + " - " + result.reference.label + " - " + media.quality,
           url: media.url,
           quality: media.quality,
@@ -691,6 +691,51 @@ function providerDisplayTitle(candidate, fallback) {
     .trim() || fallback;
 }
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function pageTitleFromHtml(html) {
+  var source = String(html || "");
+  var headingMatch = source.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i);
+  if (headingMatch) return stripTags(headingMatch[1]);
+
+  var metaTags = source.match(/<meta\b[^>]*>/gi) || [];
+  for (var index = 0; index < metaTags.length; index += 1) {
+    var metaTag = metaTags[index];
+    if (!/(?:property|name)\s*=\s*[\"'](?:og:title|twitter:title)[\"']/i.test(metaTag)) continue;
+    var contentMatch = metaTag.match(/content\s*=\s*[\"']([^\"']*)[\"']/i);
+    if (contentMatch) return stripTags(contentMatch[1]);
+  }
+
+  var titleMatch = source.match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  return titleMatch ? stripTags(titleMatch[1]) : "";
+}
+
+function episodeTitleFromPage(html, displayName) {
+  // Bölüm başlığını ek bir istek atmadan, mevcut bölüm HTML'indeki başlık alanından alırız.
+  var title = pageTitleFromHtml(html)
+    .replace(/\s*-\s*Asya\s+Animeleri\s*$/i, "")
+    .trim();
+  var seriesTitle = stripTags(displayName).trim();
+  if (!title || !seriesTitle) return "";
+
+  var normalizedTitle = normalize(title);
+  var normalizedSeriesTitle = normalize(seriesTitle);
+  if (!normalizedSeriesTitle || normalizedTitle.indexOf(normalizedSeriesTitle) !== 0) return "";
+
+  // Nuvio'da seri adı zaten gösterildiği için yalnızca bölüm açıklamasını taşırız.
+  return title.replace(new RegExp("^\\s*" + escapeRegExp(seriesTitle) + "\\s*", "i"), "").trim();
+}
+
+function streamName(sourceName, episodeTitle) {
+  // Kaynak adını korurken bölüm bilgisini Nuvio seçim ekranında görünür kılalım.
+  var parts = [PROVIDER_NAME];
+  if (episodeTitle) parts.push(episodeTitle);
+  if (sourceName) parts.push(sourceName);
+  return parts.join(" - ");
+}
+
 function streamsForCandidate(candidate, metadata, mediaType, season, episode) {
   return requestText(candidate.url, BASE_URL + "/").then(function(detailHtml) {
     var displayName = providerDisplayTitle(candidate, metadata.displayTitle);
@@ -699,7 +744,8 @@ function streamsForCandidate(candidate, metadata, mediaType, season, episode) {
 
     if (episodeUrl) {
       return requestText(episodeUrl, candidate.url).then(function(episodeHtml) {
-        return extractStreamsFromPage(episodeHtml, episodeUrl, displayTitle);
+        var episodeTitle = episodeTitleFromPage(episodeHtml, displayName);
+        return extractStreamsFromPage(episodeHtml, episodeUrl, displayTitle, episodeTitle);
       });
     }
     if (mediaType === "movie") return extractStreamsFromPage(detailHtml, candidate.url, displayTitle);
